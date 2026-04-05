@@ -317,14 +317,26 @@ export default function App() {
     const filesToProcess = currentSettings.multipleEnabled ? files : [files[0]];
     const urlsToProcess = originalUrls ? (currentSettings.multipleEnabled ? originalUrls : [originalUrls[0]]) : [];
     
-    const newUploads: UploadedFile[] = filesToProcess.map((file, index) => ({
-      id: Math.random().toString(36).substring(7),
-      originalFile: file,
-      originalSize: file.size,
-      status: 'pending',
-      previewUrl: URL.createObjectURL(file),
-      originalUrl: urlsToProcess[index]
-    }));
+    // Filter out files that are already in the uploads list by originalUrl
+    const existingUrls = new Set(uploads.map(u => u.originalUrl).filter(Boolean));
+    
+    const newUploads: UploadedFile[] = [];
+    
+    filesToProcess.forEach((file, index) => {
+      const url = urlsToProcess[index];
+      if (url && existingUrls.has(url)) return;
+      
+      newUploads.push({
+        id: Math.random().toString(36).substring(7),
+        originalFile: file,
+        originalSize: file.size,
+        status: 'pending',
+        previewUrl: URL.createObjectURL(file),
+        originalUrl: url
+      });
+    });
+
+    if (newUploads.length === 0) return;
 
     if (!currentSettings.multipleEnabled) {
       setUploads(newUploads);
@@ -345,12 +357,34 @@ export default function App() {
     
     if (!urls || urls.length === 0) return;
     
-    // Remove duplicates
-    const uniqueUrls: string[] = Array.from(new Set(urls));
+    // Normalize and filter URLs
+    const normalizeUrl = (url: string) => {
+      try {
+        // Special handling for Pinterest to get original quality and avoid duplicates
+        if (url.includes('i.pinimg.com')) {
+          return url.replace(/\/(?:236x|474x|564x|736x)\//, '/originals/');
+        }
+        // Remove tracking params
+        const u = new URL(url);
+        u.search = '';
+        return u.toString();
+      } catch (e) {
+        return url;
+      }
+    };
+
+    const uniqueUrlsMap = new Map<string, string>();
+    urls.forEach(url => {
+      const normalized = normalizeUrl(url);
+      const filename = normalized.split('/').pop()?.split('?')[0] || normalized;
+      
+      // If we already have this filename, prefer the normalized/original version
+      if (!uniqueUrlsMap.has(filename) || normalized.includes('/originals/')) {
+        uniqueUrlsMap.set(filename, url);
+      }
+    });
     
-    // Filter for image URLs (basic check)
-    const imageUrls = uniqueUrls.filter((url: string) => url.match(/\.(jpeg|jpg|gif|png|webp)(\?.*)?$/i));
-    const urlsToFetch: string[] = imageUrls.length > 0 ? imageUrls : uniqueUrls;
+    const urlsToFetch = Array.from(uniqueUrlsMap.values());
 
     setIsFetchingLinks(true);
     setFetchProgress({ current: 0, total: urlsToFetch.length });
@@ -435,12 +469,29 @@ export default function App() {
           if (urls && urls.length > 0) {
             e.preventDefault();
             
-            // Remove duplicates
-            const uniqueUrls = [...new Set(urls)];
-            
-            // Filter for image URLs (basic check)
-            const imageUrls = uniqueUrls.filter(url => url.match(/\.(jpeg|jpg|gif|png|webp)(\?.*)?$/i));
-            const urlsToFetch = imageUrls.length > 0 ? imageUrls : uniqueUrls;
+    const normalizeUrl = (url: string) => {
+      try {
+        if (url.includes('i.pinimg.com')) {
+          return url.replace(/\/(?:236x|474x|564x|736x)\//, '/originals/');
+        }
+        const u = new URL(url);
+        u.search = '';
+        return u.toString();
+      } catch (e) {
+        return url;
+      }
+    };
+
+    const uniqueUrlsMap = new Map<string, string>();
+    urls.forEach(url => {
+      const normalized = normalizeUrl(url);
+      const filename = normalized.split('/').pop()?.split('?')[0] || normalized;
+      if (!uniqueUrlsMap.has(filename) || normalized.includes('/originals/')) {
+        uniqueUrlsMap.set(filename, url);
+      }
+    });
+    
+    const urlsToFetch = Array.from(uniqueUrlsMap.values());
 
             const fetchedFiles: File[] = [];
             const fetchedUrls: string[] = [];
@@ -700,8 +751,23 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 const appUrl = '${appUrl}';
 
 function extractImages() {
-  const imageSet = new Set();
+  const imageMap = new Map(); // Use map to deduplicate by filename
   
+  const addUrl = (url) => {
+    if (!url || !url.startsWith('http')) return;
+    
+    let normalized = url;
+    // Pinterest normalization
+    if (url.includes('i.pinimg.com')) {
+      normalized = url.replace(/\\/(?:236x|474x|564x|736x)\\//, '/originals/');
+    }
+    
+    const filename = normalized.split('/').pop().split('?')[0];
+    if (!imageMap.has(filename) || normalized.includes('/originals/')) {
+      imageMap.set(filename, url);
+    }
+  };
+
   document.querySelectorAll('img').forEach(img => {
     const sources = [
       img.src,
@@ -712,14 +778,12 @@ function extractImages() {
       img.getAttribute('data-original-src')
     ];
     
-    sources.forEach(src => {
-      if (src && src.startsWith('http')) imageSet.add(src);
-    });
+    sources.forEach(addUrl);
     
     if (img.srcset) {
       const parts = img.srcset.split(',');
       const bestPart = parts[parts.length - 1].trim().split(' ')[0];
-      if (bestPart && bestPart.startsWith('http')) imageSet.add(bestPart);
+      addUrl(bestPart);
     }
   });
   
@@ -729,9 +793,7 @@ function extractImages() {
       const bg = window.getComputedStyle(el).backgroundImage;
       if (bg && bg !== 'none' && bg.includes('url(')) {
         const match = bg.match(/url\\\\(["']?([^"']+)["']?\\\\)/);
-        if (match && match[1] && match[1].startsWith('http')) {
-          imageSet.add(match[1]);
-        }
+        if (match && match[1]) addUrl(match[1]);
       }
     } catch (e) {}
   });
@@ -740,18 +802,18 @@ function extractImages() {
     if (source.srcset) {
       const parts = source.srcset.split(',');
       const bestPart = parts[parts.length - 1].trim().split(' ')[0];
-      if (bestPart && bestPart.startsWith('http')) imageSet.add(bestPart);
+      addUrl(bestPart);
     }
   });
 
   document.querySelectorAll('a').forEach(a => {
     const href = a.href;
     if (href && href.match(/\\\\.(jpeg|jpg|gif|png|webp|svg)(\\\\?.*)?$/i)) {
-      imageSet.add(href);
+      addUrl(href);
     }
   });
 
-  return Array.from(imageSet);
+  return Array.from(imageMap.values());
 }
 
 chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
