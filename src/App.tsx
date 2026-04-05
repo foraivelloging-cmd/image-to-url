@@ -192,7 +192,7 @@ export default function App() {
     localStorage.setItem('ibb_key', ibbKey);
   }, [ikPublic, ikPrivate, ibbKey]);
   const [uploads, setUploads] = useState<UploadedFile[]>(() => {
-    const saved = localStorage.getItem('imagelite_history');
+    const saved = sessionStorage.getItem('imagelite_history');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -219,7 +219,7 @@ export default function App() {
       url: u.url,
       originalUrl: u.originalUrl
     }));
-    localStorage.setItem('imagelite_history', JSON.stringify(toSave));
+    sessionStorage.setItem('imagelite_history', JSON.stringify(toSave));
   }, [uploads]);
 
   const [isDragging, setIsDragging] = useState(false);
