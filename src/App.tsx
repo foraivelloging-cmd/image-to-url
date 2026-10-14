@@ -1,12 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { UploadCloud, CheckCircle2, AlertCircle, Copy, ArrowRight, Image as ImageIcon, Loader2, Download, Trash2, Settings2, Wand2, QrCode, RefreshCw, X, Archive, Link as LinkIcon } from 'lucide-react';
+import { UploadCloud, CheckCircle2, AlertCircle, Copy, ArrowRight, Image as ImageIcon, Loader2, Download, Trash2, Settings2, Wand2, QrCode, RefreshCw, X, Archive, Link as LinkIcon, Tag, PenLine, Check, Sparkles, Sliders } from 'lucide-react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { UploadedFile } from './types';
 import { ImageCard } from './components/ImageCard';
+import { PhotoEditorModal } from './components/PhotoEditorModal';
+import { ImageKitAIModal } from './components/ImageKitAIModal';
 
-const IMAGEKIT_PUBLIC = "public_W8pXprjPHYrYwlWMf811dtUm2Og=";
-const IMAGEKIT_PRIVATE = "private_Wu/w/ZEmydjv/FbRgVKOffRxtNY=";
+const DEFAULT_IMAGEKIT_ENDPOINT = "https://ik.imagekit.io/mrsaqib";
+const DEFAULT_IMAGEKIT_PUBLIC = "public_jjC/5kLbyNiWoLMBr1id7V03+cU=";
+const DEFAULT_IMAGEKIT_PRIVATE = "private_LqhEsFrHHQANtSCf47PjrYpNXYM=";
 const IMGBB_API_KEY = 'a26bed1b2fd07ba03bff75343d0834fe';
 
 function formatBytes(bytes: number, decimals = 2) {
@@ -108,12 +111,18 @@ const compressImage = (file: File, targetSizeKB: number, format: string, filter:
   });
 };
 
-const uploadToImageKit = async (blob: Blob | File, type: string, keys: { public: string, private: string }) => {
+const uploadToImageKit = async (blob: Blob | File, type: string, keys: { public: string, private: string, endpoint?: string }, customName?: string) => {
   try {
     const extension = type.split('/')[1] || 'jpg';
+    const cleanExt = extension === 'jpeg' ? 'jpg' : extension;
+    const cleanCustom = customName ? customName.trim().replace(/[/\\?%*:|"<>]/g, '_') : '';
+    const fileName = cleanCustom 
+      ? (cleanCustom.endsWith(`.${cleanExt}`) ? cleanCustom : `${cleanCustom}.${cleanExt}`)
+      : `lite_${Date.now()}.${cleanExt}`;
+
     const formData = new FormData();
     formData.append('file', blob);
-    formData.append('fileName', `lite_${Date.now()}.${extension}`);
+    formData.append('fileName', fileName);
     formData.append('publicKey', keys.public);
     formData.append('useUniqueFileName', 'true');
 
@@ -138,18 +147,35 @@ const uploadToImageKit = async (blob: Blob | File, type: string, keys: { public:
 
     const data = await res.json();
     if (!data.url) throw new Error("ImageKit response missing URL");
-    return data.url;
+
+    let finalUrl = data.url;
+    if (keys.endpoint && data.filePath) {
+      const cleanEndpoint = keys.endpoint.replace(/\/$/, '');
+      const path = data.filePath.startsWith('/') ? data.filePath : `/${data.filePath}`;
+      finalUrl = `${cleanEndpoint}${path}`;
+    }
+    return finalUrl;
   } catch (error: any) {
     console.error("ImageKit Upload Error:", error);
     throw error;
   }
 };
 
-const uploadToImgBB = async (blob: Blob | File, type: string, apiKey: string) => {
+const uploadToImgBB = async (blob: Blob | File, type: string, apiKey: string, customName?: string) => {
   try {
     const extension = type.split('/')[1] || 'jpg';
+    const cleanExt = extension === 'jpeg' ? 'jpg' : extension;
+    const cleanCustom = customName ? customName.trim().replace(/[/\\?%*:|"<>]/g, '_') : '';
+    const fileName = cleanCustom 
+      ? (cleanCustom.endsWith(`.${cleanExt}`) ? cleanCustom : `${cleanCustom}.${cleanExt}`)
+      : `image_${Date.now()}.${cleanExt}`;
+
     const formData = new FormData();
-    formData.append('image', blob, `image.${extension}`);
+    formData.append('image', blob, fileName);
+    if (cleanCustom) {
+      const baseName = cleanCustom.replace(/\.[^/.]+$/, '');
+      formData.append('name', baseName);
+    }
     
     const res = await fetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
       method: 'POST',
@@ -173,35 +199,61 @@ const uploadToImgBB = async (blob: Blob | File, type: string, apiKey: string) =>
 };
 
 export default function App() {
-  const [server, setServer] = useState<'imagekit' | 'imgbb'>('imgbb');
+  const [server, setServer] = useState<'imagekit' | 'imgbb'>('imagekit');
   const [compressEnabled, setCompressEnabled] = useState(false);
   const [multipleEnabled, setMultipleEnabled] = useState(false);
   const [targetSize, setTargetSize] = useState(150);
   const [outputFormat, setOutputFormat] = useState<'auto' | 'webp' | 'jpeg' | 'png'>('auto');
   const [imageFilter, setImageFilter] = useState<string>('none');
   const [autoCopy, setAutoCopy] = useState(false);
+  const [autoUpload, setAutoUpload] = useState(true);
+  const [customNamePrefix, setCustomNamePrefix] = useState('');
+  const [isEditingSingleName, setIsEditingSingleName] = useState(false);
+  const [singleNameInput, setSingleNameInput] = useState('');
+  const [editingUpload, setEditingUpload] = useState<UploadedFile | null>(null);
+  const [previewModalUpload, setPreviewModalUpload] = useState<UploadedFile | null>(null);
+  const [aiModalUpload, setAiModalUpload] = useState<UploadedFile | null>(null);
   const [showKeys, setShowKeys] = useState(false);
   
-  const [ikPublic, setIkPublic] = useState(localStorage.getItem('ik_public') || IMAGEKIT_PUBLIC);
-  const [ikPrivate, setIkPrivate] = useState(localStorage.getItem('ik_private') || IMAGEKIT_PRIVATE);
+  const [ikEndpoint, setIkEndpoint] = useState(() => {
+    return localStorage.getItem('ik_endpoint') || DEFAULT_IMAGEKIT_ENDPOINT;
+  });
+  const [ikPublic, setIkPublic] = useState(() => {
+    const saved = localStorage.getItem('ik_public');
+    if (!saved || saved.includes('public_W8pX')) return DEFAULT_IMAGEKIT_PUBLIC;
+    return saved;
+  });
+  const [ikPrivate, setIkPrivate] = useState(() => {
+    const saved = localStorage.getItem('ik_private');
+    if (!saved || saved.includes('private_Wu/w')) return DEFAULT_IMAGEKIT_PRIVATE;
+    return saved;
+  });
   const [ibbKey, setIbbKey] = useState(localStorage.getItem('ibb_key') || IMGBB_API_KEY);
 
   useEffect(() => {
+    localStorage.setItem('ik_endpoint', ikEndpoint);
     localStorage.setItem('ik_public', ikPublic);
     localStorage.setItem('ik_private', ikPrivate);
     localStorage.setItem('ibb_key', ibbKey);
-  }, [ikPublic, ikPrivate, ibbKey]);
+  }, [ikEndpoint, ikPublic, ikPrivate, ibbKey]);
   const [uploads, setUploads] = useState<UploadedFile[]>(() => {
     const saved = sessionStorage.getItem('imagelite_history');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // We can't persist Blob URLs, so we'll use the final URL as preview if available
-        return parsed.map((u: any) => ({
-          ...u,
-          previewUrl: u.url || u.previewUrl,
-          status: u.status === 'success' ? 'success' : 'error' // Reset pending/uploading to error if they were interrupted
-        }));
+        return parsed
+          .filter((u: any) => Boolean(u.url || u.previewUrl || u.originalUrl))
+          .map((u: any) => {
+            const fileName = u.originalFile?.name || 'image.jpg';
+            const fileType = u.originalFile?.type || 'image/jpeg';
+            return {
+              ...u,
+              originalFile: { name: fileName, type: fileType } as any,
+              customName: u.customName || fileName.replace(/\.[^/.]+$/, ''),
+              previewUrl: u.url || u.originalUrl || u.previewUrl || '',
+              status: u.status === 'success' ? 'success' : 'error'
+            };
+          });
       } catch (e) {
         return [];
       }
@@ -210,13 +262,15 @@ export default function App() {
   });
 
   useEffect(() => {
-    const toSave = uploads.filter(u => u.status === 'success').map(u => ({
+    const toSave = uploads.filter(u => u.status === 'success' && u.url).map(u => ({
       id: u.id,
-      originalFile: { name: u.originalFile.name, type: u.originalFile.type },
+      originalFile: { name: u.originalFile?.name || 'image.jpg', type: u.originalFile?.type || 'image/jpeg' },
+      customName: u.customName,
       originalSize: u.originalSize,
       compressedSize: u.compressedSize,
       status: u.status,
       url: u.url,
+      previewUrl: u.url,
       originalUrl: u.originalUrl
     }));
     sessionStorage.setItem('imagelite_history', JSON.stringify(toSave));
@@ -235,23 +289,59 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
-  const settingsRef = useRef({ server, compressEnabled, multipleEnabled, targetSize, outputFormat, imageFilter, autoCopy });
+  const settingsRef = useRef({ 
+    server, 
+    compressEnabled, 
+    multipleEnabled, 
+    targetSize, 
+    outputFormat, 
+    imageFilter, 
+    autoCopy,
+    autoUpload,
+    customNamePrefix
+  });
 
   useEffect(() => {
-    settingsRef.current = { server, compressEnabled, multipleEnabled, targetSize, outputFormat, imageFilter, autoCopy };
-  }, [server, compressEnabled, multipleEnabled, targetSize, outputFormat, imageFilter, autoCopy]);
+    settingsRef.current = { 
+      server, 
+      compressEnabled, 
+      multipleEnabled, 
+      targetSize, 
+      outputFormat, 
+      imageFilter, 
+      autoCopy,
+      autoUpload,
+      customNamePrefix
+    };
+  }, [server, compressEnabled, multipleEnabled, targetSize, outputFormat, imageFilter, autoCopy, autoUpload, customNamePrefix]);
 
   const updateUploadStatus = useCallback((id: string, updates: Partial<UploadedFile>) => {
     setUploads(prev => prev.map(u => u.id === id ? { ...u, ...updates } : u));
   }, []);
 
-  const processSingleFile = useCallback(async (id: string, file: File, currentSettings: any, originalUrl?: string, forceUpload?: boolean) => {
+  const handleRename = useCallback((id: string, newName: string) => {
+    setUploads(prev => prev.map(u => {
+      if (u.id === id) {
+        return { ...u, customName: newName };
+      }
+      return u;
+    }));
+  }, []);
+
+  const processSingleFile = useCallback(async (
+    id: string, 
+    file: File | Blob, 
+    currentSettings: any, 
+    originalUrl?: string, 
+    forceUpload?: boolean,
+    customName?: string
+  ) => {
     try {
       let fileToUpload: Blob | File = file;
-      let outputType = file.type;
+      let outputType = file.type || 'image/jpeg';
 
       // Skip compression if it's from a URL (originalUrl exists) or if compression is disabled
-      if (currentSettings.compressEnabled && !originalUrl) {
+      if (currentSettings.compressEnabled && !originalUrl && file instanceof File) {
         updateUploadStatus(id, { status: 'compressing' });
         const isTransparent = outputType === 'image/png' || outputType === 'image/webp';
         outputType = currentSettings.outputFormat === 'auto' 
@@ -259,7 +349,12 @@ export default function App() {
           : `image/${currentSettings.outputFormat}`;
         
         fileToUpload = await compressImage(fileToUpload as File, currentSettings.targetSize, currentSettings.outputFormat, currentSettings.imageFilter);
-        updateUploadStatus(id, { compressedBlob: fileToUpload, compressedSize: fileToUpload.size });
+        const compressedUrl = URL.createObjectURL(fileToUpload);
+        updateUploadStatus(id, { 
+          compressedBlob: fileToUpload, 
+          compressedSize: fileToUpload.size,
+          previewUrl: compressedUrl 
+        });
       }
 
       // If we have an originalUrl, we just use it directly and don't upload, UNLESS forceUpload is true
@@ -276,22 +371,22 @@ export default function App() {
       let url;
       let lastError = "";
       try {
-        const ikKeys = { public: ikPublic, private: ikPrivate };
+        const ikKeys = { public: ikPublic, private: ikPrivate, endpoint: ikEndpoint };
         if (currentSettings.server === 'imagekit') {
           try {
-            url = await uploadToImageKit(fileToUpload, outputType, ikKeys);
+            url = await uploadToImageKit(fileToUpload, outputType, ikKeys, customName);
           } catch (e: any) {
             lastError = `ImageKit: ${e.message}`;
             console.warn("ImageKit failed, falling back to ImgBB", e);
-            url = await uploadToImgBB(fileToUpload, outputType, ibbKey);
+            url = await uploadToImgBB(fileToUpload, outputType, ibbKey, customName);
           }
         } else {
           try {
-            url = await uploadToImgBB(fileToUpload, outputType, ibbKey);
+            url = await uploadToImgBB(fileToUpload, outputType, ibbKey, customName);
           } catch (e: any) {
             lastError = `ImgBB: ${e.message}`;
             console.warn("ImgBB failed, falling back to ImageKit", e);
-            url = await uploadToImageKit(fileToUpload, outputType, ikKeys);
+            url = await uploadToImageKit(fileToUpload, outputType, ikKeys, customName);
           }
         }
       } catch (finalError: any) {
@@ -308,7 +403,97 @@ export default function App() {
     } catch (error: any) {
       updateUploadStatus(id, { status: 'error', error: error.message || 'Upload failed' });
     }
-  }, [updateUploadStatus]);
+  }, [updateUploadStatus, ikPublic, ikPrivate, ikEndpoint, ibbKey]);
+
+  const handleUploadToImageKit = useCallback(async (id: string): Promise<string | undefined> => {
+    const upload = uploads.find(u => u.id === id);
+    if (!upload) return undefined;
+    
+    const fileToUpload = upload.compressedBlob ? 
+      new File([upload.compressedBlob], upload.originalFile?.name || 'image.jpg', { type: upload.compressedBlob.type }) : 
+      upload.originalFile;
+      
+    updateUploadStatus(id, { status: 'uploading' });
+    const ikKeys = { public: ikPublic, private: ikPrivate, endpoint: ikEndpoint };
+    try {
+      const url = await uploadToImageKit(fileToUpload, fileToUpload.type || 'image/jpeg', ikKeys, upload.customName);
+      updateUploadStatus(id, { status: 'success', url, previewUrl: url });
+      return url;
+    } catch (err: any) {
+      updateUploadStatus(id, { status: 'error', error: err.message || 'ImageKit upload failed' });
+      throw err;
+    }
+  }, [uploads, ikPublic, ikPrivate, ikEndpoint, updateUploadStatus]);
+
+  const handleSaveAIAsNew = useCallback((originalUpload: UploadedFile, aiUrl: string, newName: string) => {
+    const newId = Math.random().toString(36).substring(7);
+    const newUpload: UploadedFile = {
+      id: newId,
+      originalFile: originalUpload.originalFile,
+      customName: newName,
+      originalSize: originalUpload.compressedSize || originalUpload.originalSize,
+      status: 'success',
+      url: aiUrl,
+      previewUrl: aiUrl,
+      originalUrl: aiUrl
+    };
+    setUploads(prev => [newUpload, ...prev]);
+  }, []);
+
+  const handleReplaceWithAI = useCallback((originalUpload: UploadedFile, aiUrl: string, newName: string) => {
+    setUploads(prev => prev.map(u => {
+      if (u.id === originalUpload.id) {
+        return {
+          ...u,
+          customName: newName,
+          status: 'success',
+          url: aiUrl,
+          previewUrl: aiUrl,
+          originalUrl: aiUrl
+        };
+      }
+      return u;
+    }));
+  }, []);
+
+  const handleSaveEditedAsNew = useCallback((originalUpload: UploadedFile, newFile: File, newName: string) => {
+    const newId = Math.random().toString(36).substring(7);
+    const newUpload: UploadedFile = {
+      id: newId,
+      originalFile: newFile,
+      customName: newName,
+      originalSize: newFile.size,
+      status: 'pending',
+      previewUrl: URL.createObjectURL(newFile),
+    };
+    setUploads(prev => [newUpload, ...prev]);
+    if (settingsRef.current.autoUpload) {
+      processSingleFile(newId, newFile, settingsRef.current, undefined, false, newName);
+    }
+  }, [processSingleFile]);
+
+  const handleReplaceWithEdited = useCallback((originalUpload: UploadedFile, newFile: File, newName: string) => {
+    setUploads(prev => prev.map(u => {
+      if (u.id === originalUpload.id) {
+        return {
+          ...u,
+          originalFile: newFile,
+          customName: newName,
+          originalSize: newFile.size,
+          compressedBlob: undefined,
+          compressedSize: undefined,
+          status: 'pending',
+          previewUrl: URL.createObjectURL(newFile),
+          url: undefined,
+          error: undefined,
+        };
+      }
+      return u;
+    }));
+    if (settingsRef.current.autoUpload) {
+      processSingleFile(originalUpload.id, newFile, settingsRef.current, undefined, false, newName);
+    }
+  }, [processSingleFile]);
 
   const processFiles = useCallback((files: File[], originalUrls?: string[]) => {
     const currentSettings = settingsRef.current;
@@ -326,9 +511,17 @@ export default function App() {
       const url = urlsToProcess[index];
       if (url && existingUrls.has(url)) return;
       
+      const fileBaseName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+      let initialCustomName = fileBaseName;
+      if (currentSettings.customNamePrefix && currentSettings.customNamePrefix.trim()) {
+        const prefix = currentSettings.customNamePrefix.trim();
+        initialCustomName = filesToProcess.length > 1 ? `${prefix}_${index + 1}` : prefix;
+      }
+
       newUploads.push({
         id: Math.random().toString(36).substring(7),
         originalFile: file,
+        customName: initialCustomName,
         originalSize: file.size,
         status: 'pending',
         previewUrl: URL.createObjectURL(file),
@@ -344,10 +537,12 @@ export default function App() {
       setUploads(prev => [...prev, ...newUploads]);
     }
 
-    newUploads.forEach(upload => {
-      processSingleFile(upload.id, upload.originalFile, currentSettings, upload.originalUrl);
-    });
-  }, [processSingleFile]);
+    if (currentSettings.autoUpload) {
+      newUploads.forEach(upload => {
+        processSingleFile(upload.id, upload.originalFile, currentSettings, upload.originalUrl, false, upload.customName);
+      });
+    }
+  }, [processSingleFile, uploads]);
 
   const handleLoadLinks = async () => {
     if (!pasteText.trim()) return;
@@ -576,7 +771,8 @@ export default function App() {
       }
     }
     
-    a.download = `optimized_${upload.originalFile.name.split('.')[0]}.${ext}`;
+    const baseName = upload.customName?.trim() || upload.originalFile.name.replace(/\.[^/.]+$/, '');
+    a.download = `${baseName}.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -869,7 +1065,7 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
   };
 
   const handleDownloadAll = async () => {
-    const successfulUploads = uploads.filter(u => (u.status === 'success' || u.status === 'error') && (u.originalFile instanceof File || u.compressedBlob));
+    const successfulUploads = uploads.filter(u => (u.status === 'success' || u.status === 'error' || u.status === 'pending') && (u.originalFile instanceof File || u.compressedBlob));
     if (successfulUploads.length === 0) return;
 
     setIsZipping(true);
@@ -890,7 +1086,8 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
           }
         }
         
-        const filename = `optimized_${upload.originalFile.name.split('.')[0]}_${index + 1}.${ext}`;
+        const baseName = upload.customName?.trim() || upload.originalFile.name.replace(/\.[^/.]+$/, '') || `image_${index + 1}`;
+        const filename = `${baseName}.${ext}`;
         zip.file(filename, blob);
       });
 
@@ -920,19 +1117,28 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
       const fileToUpload = upload.compressedBlob ? 
         new File([upload.compressedBlob], upload.originalFile.name, { type: upload.compressedBlob.type }) : 
         upload.originalFile;
-      processSingleFile(id, fileToUpload, settingsRef.current, upload.originalUrl, true);
+      processSingleFile(id, fileToUpload, settingsRef.current, upload.originalUrl, true, upload.customName);
     }
   }, [uploads, processSingleFile]);
+
+  const handleUploadAllPending = useCallback(() => {
+    const pending = uploads.filter(u => u.status === 'pending');
+    pending.forEach(u => {
+      handleForceUpload(u.id);
+    });
+  }, [uploads, handleForceUpload]);
 
   const handleReplaceInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0 && replacingId) {
       const file = e.target.files[0];
       if (file.type.startsWith('image/')) {
+        const initialCustomName = settingsRef.current.customNamePrefix.trim() || file.name.replace(/\.[^/.]+$/, '');
         setUploads(prev => prev.map(u => {
           if (u.id === replacingId) {
             return {
               ...u,
               originalFile: file,
+              customName: initialCustomName,
               originalSize: file.size,
               status: 'pending',
               previewUrl: URL.createObjectURL(file),
@@ -944,7 +1150,9 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
           }
           return u;
         }));
-        processSingleFile(replacingId, file, settingsRef.current);
+        if (settingsRef.current.autoUpload) {
+          processSingleFile(replacingId, file, settingsRef.current, undefined, false, initialCustomName);
+        }
       }
     }
     if (replaceInputRef.current) replaceInputRef.current.value = '';
@@ -1000,16 +1208,20 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                 </h1>
                 <p className="text-slate-400 text-xs">Smart Image Compressor & Uploader</p>
               </div>
-              <a 
-                href="https://picsart.com/background-remover/" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-2 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 rounded-lg text-xs font-semibold transition-colors border border-purple-500/20"
-                title="AI Background Remover (External Link)"
+              <button 
+                onClick={() => {
+                  if (uploads.length > 0) {
+                    setAiModalUpload(uploads[0]);
+                  } else {
+                    fileInputRef.current?.click();
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-purple-500/20 via-indigo-500/20 to-cyan-500/20 hover:from-purple-500/30 hover:to-cyan-500/30 text-purple-300 rounded-lg text-xs font-bold transition-all border border-purple-500/30 shadow-sm group"
+                title="Open ImageKit AI Studio (Background Removal, Face Avatars, Smart Crop, Auto Retouch)"
               >
-                <Wand2 className="w-4 h-4" />
-                <span className="hidden xl:inline">BG Remover</span>
-              </a>
+                <Sparkles className="w-4 h-4 text-purple-400 group-hover:rotate-12 transition-transform" />
+                <span>ImageKit AI</span>
+              </button>
             </div>
             <div className="flex items-center gap-2">
               {uploads.length > 0 && (
@@ -1075,6 +1287,15 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${autoCopy ? 'translate-x-5' : 'translate-x-1'}`} />
                   </button>
                 </div>
+                <div className="flex items-center gap-2" title="Toggle automatic upload when selecting files">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase">Auto-Upload</span>
+                  <button 
+                    onClick={() => setAutoUpload(!autoUpload)}
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${autoUpload ? 'bg-blue-600' : 'bg-slate-700'}`}
+                  >
+                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${autoUpload ? 'translate-x-5' : 'translate-x-1'}`} />
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1106,6 +1327,42 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                 </div>
               </div>
             )}
+
+            {/* Custom Image Name Section (Rename before upload) */}
+            <div className="p-3 bg-slate-950/70 rounded-xl border border-slate-800 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Tag className="w-3.5 h-3.5 text-blue-400" />
+                  Custom Image Name (Before Upload)
+                </label>
+                {customNamePrefix && (
+                  <button 
+                    onClick={() => setCustomNamePrefix('')}
+                    className="text-[10px] text-slate-400 hover:text-red-400 transition-colors font-semibold"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <div className="relative">
+                <input 
+                  type="text"
+                  value={customNamePrefix}
+                  onChange={(e) => setCustomNamePrefix(e.target.value)}
+                  placeholder="e.g. saqibviusal7"
+                  className="w-full bg-slate-900 border border-slate-700 focus:border-blue-500 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-slate-500 outline-none transition-colors font-mono"
+                />
+                {customNamePrefix.trim() && (
+                  <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded font-mono">
+                    Active
+                  </span>
+                )}
+              </div>
+              <div className="text-[10px] text-slate-500 flex items-center justify-between flex-wrap gap-1">
+                <span>Renames to: <strong className="text-emerald-400 font-mono">{customNamePrefix.trim() ? `${customNamePrefix.trim()}.jpg` : 'original-name.jpg'}</strong></span>
+                {!autoUpload && <span className="text-amber-400 font-medium">⚡ Manual Upload Mode</span>}
+              </div>
+            </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col">
@@ -1146,6 +1403,19 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                 {showKeys && (
                   <div className="mt-3 space-y-3 p-3 bg-slate-950/50 rounded-xl border border-slate-800 animate-in fade-in slide-in-from-top-1">
                     <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[10px] font-bold text-slate-500 uppercase">ImageKit Endpoint URL</label>
+                        <span className="text-[9px] text-emerald-400 font-semibold font-mono">AI Active</span>
+                      </div>
+                      <input 
+                        type="text"
+                        value={ikEndpoint}
+                        onChange={(e) => setIkEndpoint(e.target.value)}
+                        placeholder="https://ik.imagekit.io/mrsaqib"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-[10px] text-cyan-300 font-mono focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
                       <label className="text-[10px] font-bold text-slate-500 uppercase">ImageKit Public Key</label>
                       <input 
                         type="password"
@@ -1174,8 +1444,9 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                     </div>
                     <button 
                       onClick={() => {
-                        setIkPublic(IMAGEKIT_PUBLIC);
-                        setIkPrivate(IMAGEKIT_PRIVATE);
+                        setIkEndpoint(DEFAULT_IMAGEKIT_ENDPOINT);
+                        setIkPublic(DEFAULT_IMAGEKIT_PUBLIC);
+                        setIkPrivate(DEFAULT_IMAGEKIT_PRIVATE);
                         setIbbKey(IMGBB_API_KEY);
                       }}
                       className="w-full text-[10px] font-bold text-red-400 hover:text-red-300 uppercase pt-1"
@@ -1275,8 +1546,88 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
           ) : uploads.length === 1 ? (
             <div className="flex-1 flex flex-col h-full overflow-hidden p-6">
               <div className="flex justify-between items-center mb-4 shrink-0">
-                <h2 className="font-semibold text-slate-200 truncate pr-4">{uploads[0].originalFile.name}</h2>
+                {isEditingSingleName ? (
+                  <div className="flex items-center gap-1.5 flex-1 max-w-xs">
+                    <input 
+                      type="text" 
+                      value={singleNameInput} 
+                      onChange={(e) => setSingleNameInput(e.target.value)}
+                      placeholder="e.g. saqibviusal7"
+                      className="bg-slate-950 border border-blue-500 rounded px-2.5 py-1 text-sm text-white focus:outline-none w-full font-mono"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          const trimmed = singleNameInput.trim();
+                          if (trimmed) handleRename(uploads[0].id, trimmed);
+                          setIsEditingSingleName(false);
+                        }
+                        if (e.key === 'Escape') setIsEditingSingleName(false);
+                      }}
+                    />
+                    <button 
+                      onClick={() => {
+                        const trimmed = singleNameInput.trim();
+                        if (trimmed) handleRename(uploads[0].id, trimmed);
+                        setIsEditingSingleName(false);
+                      }} 
+                      className="p-1 text-emerald-400 hover:text-emerald-300"
+                      title="Save name"
+                    >
+                      <Check className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => setIsEditingSingleName(false)} 
+                      className="p-1 text-slate-400 hover:text-red-400"
+                      title="Cancel"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 group max-w-sm">
+                    <h2 className="font-semibold text-slate-200 truncate" title={uploads[0].customName ? `${uploads[0].customName}.${uploads[0].originalFile.name.split('.').pop() || 'jpg'}` : uploads[0].originalFile.name}>
+                      {uploads[0].customName ? `${uploads[0].customName}.${uploads[0].originalFile.name.split('.').pop() || 'jpg'}` : uploads[0].originalFile.name}
+                    </h2>
+                    <button 
+                      onClick={() => {
+                        setSingleNameInput(uploads[0].customName || uploads[0].originalFile.name.replace(/\.[^/.]+$/, ''));
+                        setIsEditingSingleName(true);
+                      }}
+                      className="text-slate-500 hover:text-blue-400 opacity-70 group-hover:opacity-100 transition-opacity p-1 shrink-0"
+                      title="Rename image (e.g. saqibviusal7)"
+                    >
+                      <PenLine className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
                 <div className="flex items-center gap-3 shrink-0">
+                  <button 
+                    onClick={() => setAiModalUpload(uploads[0])}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600/20 via-indigo-600/20 to-cyan-600/20 hover:from-purple-600/30 hover:to-cyan-600/30 text-purple-300 border border-purple-500/40 rounded-lg text-xs font-bold transition-all shadow-sm"
+                    title="ImageKit AI Studio (Remove BG, Face Avatar, Smart Focus, Auto-Enhance)"
+                  >
+                    <Wand2 className="w-3.5 h-3.5 text-purple-400" />
+                    <span>ImageKit AI</span>
+                  </button>
+                  <button 
+                    onClick={() => setEditingUpload(uploads[0])}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded-lg text-xs font-semibold transition-colors"
+                    title="Open Photo Studio Editor (Crop, Rotate, Flip, Colors, Presets)"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Edit Photo</span>
+                  </button>
+                  {uploads[0].status === 'pending' && (
+                    <button 
+                      onClick={() => handleForceUpload(uploads[0].id)}
+                      className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold shadow-md transition-colors"
+                      title="Upload image to server"
+                    >
+                      <UploadCloud className="w-4 h-4" />
+                      Upload Now
+                    </button>
+                  )}
                   <button 
                     onClick={() => handleReplaceClick(uploads[0].id)}
                     className="text-slate-400 hover:text-blue-400 transition-colors"
@@ -1301,8 +1652,34 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                 </div>
               </div>
 
-              <div className="flex-1 min-h-0 mb-6 rounded-2xl overflow-hidden border border-slate-700 bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')] bg-repeat flex items-center justify-center relative bg-slate-900/50 shadow-inner">
-                <img src={uploads[0].previewUrl} className="w-full h-full object-contain drop-shadow-2xl" alt="preview" />
+              <div className="flex-1 min-h-0 mb-6 rounded-2xl overflow-hidden border border-slate-700 bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')] bg-repeat flex items-center justify-center relative bg-slate-900/50 shadow-inner group">
+                <img 
+                  src={
+                    uploads[0].previewUrl || 
+                    (uploads[0].compressedBlob ? URL.createObjectURL(uploads[0].compressedBlob) : null) || 
+                    (uploads[0].originalFile instanceof Blob ? URL.createObjectURL(uploads[0].originalFile) : null) || 
+                    uploads[0].url || 
+                    uploads[0].originalUrl || 
+                    ''
+                  } 
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-contain drop-shadow-2xl cursor-pointer transition-transform duration-200 group-hover:scale-[1.01]" 
+                  alt={uploads[0].customName || uploads[0].originalFile?.name || 'preview'} 
+                  onClick={() => setPreviewModalUpload(uploads[0])}
+                  title="Click to view full size preview"
+                  onError={(e) => {
+                    const target = e.currentTarget;
+                    if (uploads[0].compressedBlob) {
+                      target.src = URL.createObjectURL(uploads[0].compressedBlob);
+                    } else if (uploads[0].originalFile instanceof Blob) {
+                      target.src = URL.createObjectURL(uploads[0].originalFile);
+                    } else if (uploads[0].url && target.src !== uploads[0].url) {
+                      target.src = uploads[0].url;
+                    } else if (uploads[0].originalUrl && target.src !== uploads[0].originalUrl) {
+                      target.src = uploads[0].originalUrl;
+                    }
+                  }}
+                />
               </div>
 
               <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shrink-0">
@@ -1317,6 +1694,12 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                     )}
                   </div>
                   <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => setAiModalUpload(uploads[0])}
+                      className="flex items-center gap-1.5 text-purple-400 hover:text-purple-300 transition-colors font-semibold"
+                    >
+                      <Wand2 className="w-3.5 h-3.5" /> AI Magic
+                    </button>
                     {uploads[0].status === 'success' && uploads[0].url && (
                       <button 
                         onClick={() => navigator.clipboard.writeText(uploads[0].url!)}
@@ -1386,6 +1769,16 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
               <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 shrink-0">
                 <h2 className="font-semibold text-slate-200">Uploads ({uploads.length})</h2>
                 <div className="flex items-center gap-3">
+                  {uploads.some(u => u.status === 'pending') && (
+                    <button 
+                      onClick={handleUploadAllPending}
+                      className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-lg text-xs font-bold transition-colors shadow-md"
+                      title="Upload all pending images"
+                    >
+                      <UploadCloud className="w-4 h-4" />
+                      Upload All
+                    </button>
+                  )}
                   {uploads.some(u => u.status === 'success' || u.status === 'error') && (
                     <button 
                       onClick={handleDownloadAll}
@@ -1418,6 +1811,10 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
                     onDownload={handleDownload}
                     onShowQR={(url) => setActiveQR(activeQR === upload.id ? null : upload.id)}
                     onForceUpload={handleForceUpload}
+                    onRename={handleRename}
+                    onEdit={(u) => setEditingUpload(u)}
+                    onPreview={(u) => setPreviewModalUpload(u)}
+                    onOpenAIModal={(u) => setAiModalUpload(u)}
                     formatBytes={formatBytes}
                   />
                 ))}
@@ -1426,6 +1823,145 @@ chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
           )}
         </div>
       </div>
+
+      {/* Photo Studio Editor Modal */}
+      {editingUpload && (
+        <PhotoEditorModal
+          isOpen={true}
+          upload={editingUpload}
+          onClose={() => setEditingUpload(null)}
+          onSaveAsNew={handleSaveEditedAsNew}
+          onReplaceCurrent={handleReplaceWithEdited}
+        />
+      )}
+
+      {/* ImageKit AI Studio Modal */}
+      {aiModalUpload && (
+        <ImageKitAIModal
+          isOpen={true}
+          upload={aiModalUpload}
+          endpoint={ikEndpoint}
+          onClose={() => setAiModalUpload(null)}
+          onSaveAsNew={handleSaveAIAsNew}
+          onReplaceCurrent={handleReplaceWithAI}
+          onUploadToImageKit={handleUploadToImageKit}
+        />
+      )}
+
+      {/* Full-Screen Image Preview Lightbox Modal */}
+      {previewModalUpload && (
+        <div 
+          onClick={() => setPreviewModalUpload(null)}
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()} 
+            className="bg-slate-900 border border-slate-800 w-full max-w-4xl max-h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-white"
+          >
+            {/* Header */}
+            <div className="h-14 px-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/60 shrink-0">
+              <div className="flex items-center gap-2 truncate pr-4">
+                <ImageIcon className="w-4 h-4 text-blue-400 shrink-0" />
+                <span className="text-sm font-semibold text-slate-200 truncate">
+                  {previewModalUpload.customName 
+                    ? `${previewModalUpload.customName}.${previewModalUpload.originalFile?.name ? previewModalUpload.originalFile.name.split('.').pop() : 'jpg'}`
+                    : (previewModalUpload.originalFile?.name || 'Image Preview')}
+                </span>
+                <span className="text-[11px] text-slate-500 font-mono shrink-0">
+                  ({formatBytes(previewModalUpload.compressedSize || previewModalUpload.originalSize)})
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => {
+                    const target = previewModalUpload;
+                    setPreviewModalUpload(null);
+                    setAiModalUpload(target);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500/20 to-cyan-500/20 hover:from-purple-500/30 hover:to-cyan-500/30 text-purple-300 border border-purple-500/40 rounded-lg text-xs font-semibold transition-colors"
+                >
+                  <Wand2 className="w-3.5 h-3.5 text-purple-400" />
+                  <span>ImageKit AI</span>
+                </button>
+                <button
+                  onClick={() => {
+                    const target = previewModalUpload;
+                    setPreviewModalUpload(null);
+                    setEditingUpload(target);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded-lg text-xs font-semibold transition-colors"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Edit in Studio</span>
+                </button>
+                <button
+                  onClick={() => handleDownload(previewModalUpload)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-colors shadow"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download</span>
+                </button>
+                <button
+                  onClick={() => setPreviewModalUpload(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800/60 hover:bg-slate-800 transition-colors ml-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Image Preview Viewport */}
+            <div className="flex-1 min-h-[350px] p-6 flex items-center justify-center bg-[url('https://www.transparenttextures.com/patterns/checkerboard.png')] bg-repeat bg-slate-950/80 overflow-auto">
+              <img
+                src={
+                  previewModalUpload.previewUrl || 
+                  (previewModalUpload.compressedBlob ? URL.createObjectURL(previewModalUpload.compressedBlob) : null) || 
+                  (previewModalUpload.originalFile instanceof Blob ? URL.createObjectURL(previewModalUpload.originalFile) : null) || 
+                  previewModalUpload.url || 
+                  previewModalUpload.originalUrl || 
+                  ''
+                }
+                referrerPolicy="no-referrer"
+                className="max-w-full max-h-[65vh] object-contain drop-shadow-2xl rounded"
+                alt="preview"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (previewModalUpload.compressedBlob) {
+                    target.src = URL.createObjectURL(previewModalUpload.compressedBlob);
+                  } else if (previewModalUpload.originalFile instanceof Blob) {
+                    target.src = URL.createObjectURL(previewModalUpload.originalFile);
+                  } else if (previewModalUpload.url && target.src !== previewModalUpload.url) {
+                    target.src = previewModalUpload.url;
+                  } else if (previewModalUpload.originalUrl && target.src !== previewModalUpload.originalUrl) {
+                    target.src = previewModalUpload.originalUrl;
+                  }
+                }}
+              />
+            </div>
+
+            {/* Footer with URL & copy if uploaded */}
+            {previewModalUpload.url && (
+              <div className="p-3 bg-slate-950/80 border-t border-slate-800 flex items-center justify-between gap-3 text-xs">
+                <input 
+                  type="text" 
+                  readOnly 
+                  value={previewModalUpload.url} 
+                  className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-300 font-mono outline-none"
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(previewModalUpload.url!);
+                  }}
+                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold flex items-center gap-1.5 shrink-0 transition-colors"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy Link</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

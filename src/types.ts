@@ -1,6 +1,7 @@
 export interface UploadedFile {
   id: string;
   originalFile: File;
+  customName?: string;
   originalSize: number;
   compressedBlob?: Blob;
   compressedSize?: number;
